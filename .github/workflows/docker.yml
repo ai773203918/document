@@ -1,60 +1,120 @@
+# 工作流的名称，会显示在 GitHub Actions 的界面上
 name: Build and Push Docker Image
 
+# 定义工作流的触发条件
 on:
+  # 当有代码被推送时触发
   push:
+    # 仅当推送到 main 分支时
     branches:
       - main
+    # 仅当推送的标签符合 "v*.*.*" 格式时 (例如 v1.0.0, v2.1.3)
     tags:
       - "v*.*.*"
+  # 允许在 GitHub Actions 界面上手动触发此工作流
   workflow_dispatch:  # 手动触发
 
+# 定义要执行的任务
 jobs:
+  # 任务ID，这里只有一个任务，名为 build-and-push
   build-and-push:
+    # 指定任务运行在最新版的 Ubuntu Linux 虚拟机上
     runs-on: ubuntu-latest
+    # 为 GITHUB_TOKEN 设置权限，这是安全性的关键部分
     permissions:
+      # 允许读取仓库内容（用于 checkout 代码）
       contents: read
+      # 允许写入包（用于推送镜像到 GitHub Container Registry）
       packages: write
 
+    # 定义任务执行的步骤
     steps:
+      # 步骤 1: 检出代码
       - name: Checkout code
+        # 使用官方的 checkout action v6，将仓库代码下载到 runner 中
         uses: actions/checkout@v6
 
+      # 步骤 2: 设置 QEMU 模拟器
       - name: Set up QEMU
+        # 使用 docker/setup-qemu-action v3
+        # 这是构建多平台镜像（如 ARM64）的关键，它允许在 AMD64 架构的 runner 上模拟其他 CPU 架构
         uses: docker/setup-qemu-action@v3
 
+      # 步骤 3: 设置 Docker Buildx
       - name: Set up Docker Buildx
+        # 使用 docker/setup-buildx-action v3
+        # Docker Buildx 是一个增强版的构建工具，支持多平台构建和高级缓存功能
         uses: docker/setup-buildx-action@v3
 
+      # 步骤 4: 登录到 GitHub Container Registry (GHCR)
       - name: Login to GHCR
+        # 使用官方的 docker/login-action v3
         uses: docker/login-action@v3
         with:
+          # 指定要登录的容器仓库地址
           registry: ghcr.io
+          # 用户名：github.actor 是一个内置变量，代表触发本次工作流的用户名
           username: ${{ github.actor }}
+          # 密码：GITHUB_TOKEN 是 GitHub 自动生成的临时令牌，无需手动创建
+          # 它的权限由上方的 permissions 块控制
           password: ${{ secrets.GITHUB_TOKEN }}
 
+            # --- 新增步骤：登录到 Docker Hub ---
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # --- 修改步骤：为两个仓库提取元数据 ---
       - name: Extract metadata (tags, labels)
+        # 为此步骤设置一个 ID，方便后续步骤引用其输出
         id: meta
+        # 使用 docker/metadata-action v5，这是一个非常强大的 action，可以根据上下文自动生成标签
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          # 在 images 中同时指定 GHCR 和 Docker Hub 的镜像名
+          images: |
+            # GHCR 的格式是 "用户名/仓库名"，所以使用 github.repository 是正确的
+            ghcr.io/${{ github.repository }}
+            # Docker Hub 的格式是 "用户名/仓库名"，这里我们只用仓库名部分
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}
           flavor: |
+            # 禁用默认的 latest 标签行为，改为由下面的 tags 规则精确控制
             latest=false
           tags: |
+            # 当事件是分支推送时，使用分支名作为标签 (例如 main)
             type=ref,event=branch
+            # 当事件是 Pull Request 时，使用 PR 编号作为标签 (例如 pr-123)
             type=ref,event=pr
+            # 当事件是语义化版本标签时，使用完整版本号作为标签 (例如 1.2.3)
             type=semver,pattern={{version}}
+            # 同上，但使用主版本号和次版本号 (例如 1.2)
             type=semver,pattern={{major}}.{{minor}}
+            # 使用提交 SHA 的短格式作为标签 (例如 f1a2b3c)
             type=sha,format=short
+            # 这是一个条件标签：只有当推送的是标签时，才打上 latest 标签
+            # 这是最佳实践，确保 latest 指向一个正式发布版本
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
 
+      # --- 此步骤无需修改，它会自动使用上面生成的所有标签 ---
       - name: Build and push Docker image
+        # 使用官方的 docker/build-push-action v6
         uses: docker/build-push-action@v6
         with:
+          # 构建上下文路径，"." 表示当前目录
           context: .
+          # Dockerfile 的路径
           file: ./Dockerfile
+          # 设置为 true，表示构建成功后立即推送
           push: true
+          # 使用上一步生成的所有标签
           tags: ${{ steps.meta.outputs.tags }}
+          # 使用上一步生成的所有元数据标签
           labels: ${{ steps.meta.outputs.labels }}
+          # 指定要构建的目标平台，这正是前面设置 QEMU 和 Buildx 的原因
           platforms: linux/amd64,linux/arm64
+          # 启用构建缓存，从 GitHub Actions 的缓存中加载
           cache-from: type=gha
+          # 将构建缓存保存回 GitHub Actions，mode=max 表示最大化缓存内容
           cache-to: type=gha,mode=max
